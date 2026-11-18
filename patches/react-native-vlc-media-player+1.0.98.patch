@@ -1,0 +1,80 @@
+diff --git a/node_modules/react-native-vlc-media-player/android/src/main/java/com/yuanzhou/vlc/vlcplayer/ReactVlcPlayerView.java b/node_modules/react-native-vlc-media-player/android/src/main/java/com/yuanzhou/vlc/vlcplayer/ReactVlcPlayerView.java
+index 8c7acdf..057a00f 100644
+--- a/node_modules/react-native-vlc-media-player/android/src/main/java/com/yuanzhou/vlc/vlcplayer/ReactVlcPlayerView.java
++++ b/node_modules/react-native-vlc-media-player/android/src/main/java/com/yuanzhou/vlc/vlcplayer/ReactVlcPlayerView.java
+@@ -8,6 +8,7 @@ import android.media.AudioManager;
+ import android.net.Uri;
+ import android.os.Handler;
+ import android.os.Looper;
++import android.os.ParcelFileDescriptor;
+ import android.util.DisplayMetrics;
+ import android.util.Log;
+ import android.view.Surface;
+@@ -45,6 +46,8 @@ class ReactVlcPlayerView extends TextureView implements
+ 
+     private final VideoEventEmitter eventEmitter;
+     private LibVLC libvlc;
++    // MOV-Player patch: keeps a content:// descriptor alive while LibVLC reads it
++    private ParcelFileDescriptor mContentPfd = null;
+     private MediaPlayer mMediaPlayer = null;
+     private boolean mMuted = false;
+     private boolean isSurfaceViewDestory;
+@@ -363,7 +366,7 @@ class ReactVlcPlayerView extends TextureView implements
+ 
+             if (initOptions != null) {
+                 ArrayList options = initOptions.toArrayList();
+-                for (int i = 0; i < options.size() - 1; i++) {
++                for (int i = 0; i < options.size(); i++) {
+                     String option = (String) options.get(i);
+                     cOptions.add(option);
+                 }
+@@ -422,7 +425,15 @@ class ReactVlcPlayerView extends TextureView implements
+             }
+             DisplayMetrics dm = getResources().getDisplayMetrics();
+             Media m = null;
+-            if (isNetwork) {
++            if (uriString != null && uriString.startsWith("content://")) {
++                // MOV-Player patch: LibVLC has no content:// access module. Open the file
++                // through the ContentResolver and hand LibVLC the raw descriptor (fd://),
++                // so picked files play directly without copying them to cache first.
++                mContentPfd = getContext().getContentResolver().openFileDescriptor(Uri.parse(uriString), "r");
++                m = new Media(libvlc, mContentPfd.getFileDescriptor());
++            } else if (isNetwork || (uriString != null && uriString.contains("://"))) {
++                // MOV-Player patch: file:// URIs must go through the Uri constructor; the
++                // String constructor treats its argument as a plain filesystem path.
+                 Uri uri = Uri.parse(uriString);
+                 m = new Media(libvlc, uri);
+             } else {
+@@ -443,7 +454,7 @@ class ReactVlcPlayerView extends TextureView implements
+             //添加media  option
+             if (mediaOptions != null) {
+                 ArrayList options = mediaOptions.toArrayList();
+-                for (int i = 0; i < options.size() - 1; i++) {
++                for (int i = 0; i < options.size(); i++) {
+                     String option = (String) options.get(i);
+                     m.addOption(option);
+                 }
+@@ -483,7 +494,11 @@ class ReactVlcPlayerView extends TextureView implements
+             setProgressUpdateRunnable();
+         } catch (Exception e) {
+             e.printStackTrace();
+-            //Toast.makeText(getContext(), "Error creating player!", Toast.LENGTH_LONG).show();
++            // MOV-Player patch: surface setup failures (e.g. unreadable content:// URI) to JS
++            WritableMap errMap = Arguments.createMap();
++            errMap.putString("type", "Error");
++            errMap.putString("message", "Error creating player: " + e.getMessage());
++            eventEmitter.sendEvent(errMap, VideoEventEmitter.EVENT_ON_ERROR);
+         }
+     }
+ 
+@@ -498,6 +513,10 @@ class ReactVlcPlayerView extends TextureView implements
+         mMediaPlayer.release();
+         libvlc.release();
+         libvlc = null;
++        if (mContentPfd != null) {
++            try { mContentPfd.close(); } catch (Exception ignored) {}
++            mContentPfd = null;
++        }
+ 
+         if(mProgressUpdateRunnable != null){
+             mProgressUpdateHandler.removeCallbacks(mProgressUpdateRunnable);
